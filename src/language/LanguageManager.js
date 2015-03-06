@@ -120,6 +120,12 @@
  *         isBinary: true    
  *     }); 
  * 
+ * 
+ * LanguageManager dispatches two events:
+ * 
+ *  - languageAdded -- When any new Language is added. 2nd arg is the new Language.
+ *  - languageModified -- When the attributes of a Language change, or when the Language gains or loses
+ *          file extension / filename mappings. 2nd arg is the modified Language.
  */
 define(function (require, exports, module) {
     "use strict";
@@ -127,6 +133,7 @@ define(function (require, exports, module) {
     
     // Dependencies
     var CodeMirror            = require("thirdparty/CodeMirror2/lib/codemirror"),
+        EventDispatcher       = require("utils/EventDispatcher"),
         Async                 = require("utils/Async"),
         FileUtils             = require("file/FileUtils"),
         _defaultLanguagesJSON = require("text!language/languages.json"),
@@ -228,28 +235,6 @@ define(function (require, exports, module) {
     }
     
     /**
-     * Adds a language mapping for the specified fullPath. If language is falsy (null or undefined), the mapping
-     * is removed.
-     *
-     * @param {!fullPath} fullPath absolute path of the file
-     * @param {?object} language language to associate the file with or falsy value to remove the existing mapping
-     */
-    function _setLanguageOverrideForPath(fullPath, language) {
-        if (!language) {
-            delete _filePathToLanguageMap[fullPath];
-        } else {
-            _filePathToLanguageMap[fullPath] = language;
-        }
-    }
-    
-    /**
-     * Resets all the language overrides for file paths. Used by unit tests only.
-     */
-    function _resetLanguageOverrides() {
-        _filePathToLanguageMap = {};
-    }
-
-    /**
      * Resolves a language ID to a Language object.
      * File names have a higher priority than file extensions. 
      * @param {!string} id Identifier for this language: lowercase letters, digits, and _ separators (e.g. "cpp", "foo_bar", "c99")
@@ -260,7 +245,9 @@ define(function (require, exports, module) {
     }
     
     /**
-     * Resolves a language to a file extension
+     * Resolves a file extension to a Language object.
+     * *Warning:* it is almost always better to use getLanguageForPath(), since Language can depend
+     * on file name and even full path. Use this API only if no relevant file/path exists.
      * @param {!string} extension Extension that language should be resolved for
      * @return {?Language} The language for the provided extension or null if none exists
      */
@@ -371,7 +358,7 @@ define(function (require, exports, module) {
     function _triggerLanguageAdded(language) {
         // finally, store language to _language map
         _languages[language.getId()] = language;
-        $(exports).triggerHandler("languageAdded", [language]);
+        exports.trigger("languageAdded", language);
     }
 
     /**
@@ -380,8 +367,72 @@ define(function (require, exports, module) {
      * @param {!Language} language The modified language
      */
     function _triggerLanguageModified(language) {
-        $(exports).triggerHandler("languageModified", [language]);
+        exports.trigger("languageModified", language);
     }
+    
+    /**
+     * Adds a language mapping for the specified fullPath. If language is falsy (null or undefined), the mapping
+     * is removed. The override is NOT persisted across Brackets sessions.
+     *
+     * @param {!fullPath} fullPath absolute path of the file
+     * @param {?object} language language to associate the file with or falsy value to remove any existing override
+     */
+    function setLanguageOverrideForPath(fullPath, language) {
+        var oldLang = getLanguageForPath(fullPath);
+        if (!language) {
+            delete _filePathToLanguageMap[fullPath];
+        } else {
+            _filePathToLanguageMap[fullPath] = language;
+        }
+        var newLang = getLanguageForPath(fullPath);
+        
+        // Old language changed since this path is no longer mapped to it
+        _triggerLanguageModified(oldLang);
+        // New language changed since a path is now mapped to it that wasn't before
+        _triggerLanguageModified(newLang);
+    }
+    
+    /**
+     * Resets all the language overrides for file paths. Used by unit tests only.
+     */
+    function _resetPathLanguageOverrides() {
+        _filePathToLanguageMap = {};
+    }
+    
+    /**
+     * Get the file extension (excluding ".") given a path OR a bare filename.
+     * Returns "" for names with no extension.
+     * If the only `.` in the file is the first character,
+     * returns "" as this is not considered an extension.
+     * This method considers known extensions which include `.` in them.
+     *
+     * @param {string} fullPath full path to a file or directory
+     * @return {string} Returns the extension of a filename or empty string if
+     * the argument is a directory or a filename with no extension
+     */
+    function getCompoundFileExtension(fullPath) {
+        var baseName = FileUtils.getBaseName(fullPath),
+            parts = baseName.split(".");
+
+        // get rid of file name
+        parts.shift();
+        if (baseName[0] === ".") {
+            // if starts with a `.`, then still consider it as file name
+            parts.shift();
+        }
+
+        var extension = [parts.pop()], // last part is always an extension
+            i = parts.length;
+        while (i--) {
+            if (getLanguageForExtension(parts[i])) {
+                extension.unshift(parts[i]);
+            } else {
+                break;
+            }
+        }
+        return extension.join(".");
+    }
+
     
 
     /**
@@ -790,7 +841,7 @@ define(function (require, exports, module) {
      * Returns either a language associated with the mode or the fallback language.
      * Used to disambiguate modes used by multiple languages.
      * @param {!string} mode The mode to associate the language with
-     * @return {Language} This language if it uses the mode, or whatever {@link LanguageManager#_getLanguageForMode} returns
+     * @return {Language} This language if it uses the mode, or whatever {@link #_getLanguageForMode} returns
      */
     Language.prototype.getLanguageForMode = function (mode) {
         if (mode === this._mode) {
@@ -829,7 +880,7 @@ define(function (require, exports, module) {
     
     /**
      * Trigger the "languageModified" event if this language is registered already
-     * @see _triggerLanguageModified
+     * @see #_triggerLanguageModified
      * @private
      */
     Language.prototype._wasModified = function () {
@@ -989,7 +1040,7 @@ define(function (require, exports, module) {
      *     }
      */
     function _updateFromPrefs(pref) {
-        var newMapping = PreferencesManager.get(pref) || {},
+        var newMapping = PreferencesManager.get(pref),
             newNames = Object.keys(newMapping),
             state = _prefState[pref],
             last = state.last,
@@ -1039,6 +1090,8 @@ define(function (require, exports, module) {
     }
     
    
+    EventDispatcher.makeEventDispatcher(exports);
+    
     // Prevent modes from being overwritten by extensions
     _patchCodeMirror();
     
@@ -1050,7 +1103,12 @@ define(function (require, exports, module) {
         "scriptTypes": [{"matches": /\/x-handlebars|\/x-mustache|^text\/html$/i,
                        "mode": null}]
     });
- 
+
+    // Define SVG MIME type so an SVG language can be defined for SVG-specific code hints.
+    // Currently, SVG uses XML mode so it has generic XML syntax highlighting. This can
+    // be removed when SVG gets its own CodeMirror mode with SVG syntax highlighting.
+    CodeMirror.defineMIME("image/svg+xml", "xml");
+    
     // Load the default languages
     _defaultLanguagesJSON = JSON.parse(_defaultLanguagesJSON);
     _ready = Async.doInParallel(Object.keys(_defaultLanguagesJSON), function (key) {
@@ -1086,25 +1144,21 @@ define(function (require, exports, module) {
         // depends on FileUtils) here. Using the async form of require fixes this.
         require(["preferences/PreferencesManager"], function (pm) {
             PreferencesManager = pm;
-            _updateFromPrefs(_EXTENSION_MAP_PREF);
-            _updateFromPrefs(_NAME_MAP_PREF);
-            pm.definePreference(_EXTENSION_MAP_PREF, "object").on("change", function () {
+            pm.definePreference(_EXTENSION_MAP_PREF, "object", {}).on("change", function () {
                 _updateFromPrefs(_EXTENSION_MAP_PREF);
             });
-            pm.definePreference(_NAME_MAP_PREF, "object").on("change", function () {
+            pm.definePreference(_NAME_MAP_PREF, "object", {}).on("change", function () {
                 _updateFromPrefs(_NAME_MAP_PREF);
             });
+            _updateFromPrefs(_EXTENSION_MAP_PREF);
+            _updateFromPrefs(_NAME_MAP_PREF);
         });
     });
     
     // Private for unit tests
     exports._EXTENSION_MAP_PREF         = _EXTENSION_MAP_PREF;
     exports._NAME_MAP_PREF              = _NAME_MAP_PREF;
-    exports._resetLanguageOverrides     = _resetLanguageOverrides;
-    // Internal use only
-    // _setLanguageOverrideForPath is used by Document to help LanguageManager keeping track of
-    // in-document language overrides
-    exports._setLanguageOverrideForPath  = _setLanguageOverrideForPath;
+    exports._resetPathLanguageOverrides = _resetPathLanguageOverrides;
     
     // Public methods
     exports.ready                       = _ready;
@@ -1113,4 +1167,6 @@ define(function (require, exports, module) {
     exports.getLanguageForExtension     = getLanguageForExtension;
     exports.getLanguageForPath          = getLanguageForPath;
     exports.getLanguages                = getLanguages;
+    exports.setLanguageOverrideForPath  = setLanguageOverrideForPath;
+    exports.getCompoundFileExtension    = getCompoundFileExtension;
 });

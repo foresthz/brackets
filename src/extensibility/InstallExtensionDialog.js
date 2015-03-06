@@ -32,8 +32,6 @@ define(function (require, exports, module) {
         File                   = require("filesystem/File"),
         StringUtils            = require("utils/StringUtils"),
         Strings                = require("strings"),
-        Commands               = require("command/Commands"),
-        CommandManager         = require("command/CommandManager"),
         FileSystem             = require("filesystem/FileSystem"),
         KeyEvent               = require("utils/KeyEvent"),
         Package                = require("extensibility/Package"),
@@ -389,7 +387,7 @@ define(function (require, exports, module) {
         this.$browseExtensionsButton.on("click", function () {
             NativeApp.openURLInDefaultBrowser(brackets.config.extension_listing_url);
         });
-        $(document.body).on("keyup.installDialog", this._handleKeyUp.bind(this));
+        $(window.document.body).on("keyup.installDialog", this._handleKeyUp.bind(this));
         
         this._enterState(STATE_START);
         if (urlToInstall) {

@@ -22,7 +22,7 @@
  */
 
 
-/*global define, $, localStorage, brackets, console */
+/*global define, $, brackets */
 
 /**
  * Generates the fully configured preferences systems used throughout Brackets. This is intended
@@ -70,11 +70,20 @@ define(function (require, exports, module) {
     // Create a Project scope
     var projectStorage          = new PreferencesBase.FileStorage(undefined, true),
         projectScope            = new PreferencesBase.Scope(projectStorage),
-        projectPathLayer        = new PreferencesBase.PathLayer();
+        projectPathLayer        = new PreferencesBase.PathLayer(),
+        projectLanguageLayer    = new PreferencesBase.LanguageLayer();
 
     projectScope.addLayer(projectPathLayer);
+    projectScope.addLayer(projectLanguageLayer);
+    
+    // Create a User scope
+    var userStorage             = new PreferencesBase.FileStorage(userPrefFile, true),
+        userScope               = new PreferencesBase.Scope(userStorage),
+        userLanguageLayer       = new PreferencesBase.LanguageLayer();
+    
+    userScope.addLayer(userLanguageLayer);
 
-    var userScopeLoading = manager.addScope("user", new PreferencesBase.FileStorage(userPrefFile, true));
+    var userScopeLoading = manager.addScope("user", userScope);
 
     _addScopePromises.push(userScopeLoading);
 
@@ -123,7 +132,6 @@ define(function (require, exports, module) {
             stateManager.fileChanged(userStateFile);
         }
     }
-    
     
     // Semi-Public API. Use this at your own risk. The public API is in PreferencesManager.
     exports.manager             = manager;

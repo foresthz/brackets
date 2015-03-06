@@ -22,19 +22,19 @@
  */
 
 /*jslint vars: true, plusplus: true, devel: true, regexp: true, nomen: true, indent: 4, maxerr: 50 */
-/*global $, define, require, less */
+/*global $, define, less */
 
 define(function (require, exports, module) {
     "use strict";
 
     var _                  = require("thirdparty/lodash"),
+        EventDispatcher    = require("utils/EventDispatcher"),
         FileSystem         = require("filesystem/FileSystem"),
         FileUtils          = require("file/FileUtils"),
         EditorManager      = require("editor/EditorManager"),
         ExtensionUtils     = require("utils/ExtensionUtils"),
         ThemeSettings      = require("view/ThemeSettings"),
         ThemeView          = require("view/ThemeView"),
-        AppInit            = require("utils/AppInit"),
         PreferencesManager = require("preferences/PreferencesManager"),
         prefs              = PreferencesManager.getExtensionPrefs("themes");
 
@@ -44,8 +44,7 @@ define(function (require, exports, module) {
         defaultTheme    = "thor-light-theme",
         commentRegex    = /\/\*([\s\S]*?)\*\//mg,
         scrollbarsRegex = /((?:[^}|,]*)::-webkit-scrollbar(?:[^{]*)[{](?:[^}]*?)[}])/mgi,
-        stylesPath      = FileUtils.getNativeBracketsDirectoryPath() + "/styles/",
-        validExtensions = ["css", "less"];
+        stylesPath      = FileUtils.getNativeBracketsDirectoryPath() + "/styles/";
 
 
     /**
@@ -79,15 +78,29 @@ define(function (require, exports, module) {
         options = options || {};
         var fileName = file.name;
 
-        // The name is used to map the loaded themes to the list in the settings dialog. So we want
-        // a unique name if one is not provided.  This is particularly important when loading just
-        // files where there is no other way to feed in meta data to provide unique names.  Say, there
-        // is a theme1.css and a theme1.less that are entirely different themes...
+        // If no options.name is provided, then we derive the name of the theme from whichever we find
+        // first, the options.title or the filename.
+        if (!options.name) {
+            if (options.title) {
+                options.name = options.title;
+            } else {
+                // Remove the file extension when the filename is used as the theme name. This is to
+                // follow CodeMirror conventions where themes are just a CSS file and the filename
+                // (without the extension) is used to build CSS rules.  Also handle removing .min
+                // in case the ".min" is part of the file name.
+                options.name = FileUtils.getFilenameWithoutExtension(fileName).replace(/\.min$/, "");
+            }
 
-        this.file        = file;
-        this.name        = options.name  || (options.title || fileName).toLocaleLowerCase().replace(/[\W]/g, '-');
-        this.displayName = options.title || toDisplayName(fileName);
-        this.dark        = options.theme !== undefined && options.theme.dark === true;
+            // We do a bit of string treatment here to make sure we generate theme names that can be
+            // used as a CSS class name by CodeMirror.
+            options.name = options.name.toLocaleLowerCase().replace(/[\W]/g, '-');
+        }
+
+        this.file           = file;
+        this.name           = options.name;
+        this.displayName    = options.title || toDisplayName(fileName);
+        this.dark           = options.theme !== undefined && options.theme.dark === true;
+        this.addModeClass   = options.theme !== undefined && options.theme.addModeClass === true;
     }
 
 
@@ -154,7 +167,7 @@ define(function (require, exports, module) {
             filename: fixPath(theme.file._path)
         });
 
-        parser.parse("#editor-holder {" + content + "}", function (err, tree) {
+        parser.parse("#editor-holder {" + content + "\n}", function (err, tree) {
             if (err) {
                 deferred.reject(err);
             } else {
@@ -164,20 +177,6 @@ define(function (require, exports, module) {
 
         return deferred.promise();
     }
-
-
-    /**
-     * @private
-     * Verifies that the file passed in is a valid theme file type.
-     *
-     * @param {File} file is object to verify if it is a valid theme file type
-     * @return {boolean} to confirm if the file is a valid theme file type
-     */
-    function isFileTypeValid(file) {
-        return file.isFile &&
-            validExtensions.indexOf(FileUtils.getFileExtension(file.name)) !== -1;
-    }
-
 
     /**
      * @private
@@ -251,7 +250,7 @@ define(function (require, exports, module) {
     /**
      * Refresh current theme in the editor
      *
-     * @param {boolean} force Forces a reload the current theme.  It reload the theme file.
+     * @param {boolean} force Forces a reload of the current theme.  It reloads the theme file.
      */
     function refresh(force) {
         if (force) {
@@ -265,8 +264,10 @@ define(function (require, exports, module) {
             }
 
             var cm = editor._codeMirror;
-            ThemeView.setDocumentMode(cm);
             ThemeView.updateThemes(cm);
+
+            // currentTheme can be undefined, so watch out
+            cm.setOption("addModeClass", !!(currentTheme && currentTheme.addModeClass));
         });
     }
 
@@ -334,7 +335,7 @@ define(function (require, exports, module) {
         ThemeView.updateScrollbars(getCurrentTheme());
 
         // Expose event for theme changes
-        $(exports).trigger("themeChange", getCurrentTheme());
+        exports.trigger("themeChange", getCurrentTheme());
     });
 
     prefs.on("change", "themeScrollbars", function () {
@@ -354,11 +355,13 @@ define(function (require, exports, module) {
         }
     });
 
-    $(EditorManager).on("activeEditorChange", function () {
+    EditorManager.on("activeEditorChange", function () {
         refresh();
     });
 
-
+    
+    EventDispatcher.makeEventDispatcher(exports);
+    
     exports.refresh         = refresh;
     exports.loadFile        = loadFile;
     exports.loadPackage     = loadPackage;

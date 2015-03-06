@@ -23,7 +23,7 @@
 
 
 /*jslint vars: true, plusplus: true, devel: true, nomen: true, indent: 4, maxerr: 50 */
-/*global define, $, brackets, window */
+/*global define, $, brackets */
 
 /**
  * ExtensionLoader searches the filesystem for extensions, then creates a new context for each one and loads it.
@@ -40,6 +40,7 @@ define(function (require, exports, module) {
     require("utils/Global");
 
     var _              = require("thirdparty/lodash"),
+        EventDispatcher = require("utils/EventDispatcher"),
         FileSystem     = require("filesystem/FileSystem"),
         FileUtils      = require("file/FileUtils"),
         Async          = require("utils/Async"),
@@ -56,7 +57,7 @@ define(function (require, exports, module) {
     
     /**
      * Stores require.js contexts of extensions
-     * @type {Object<string, Object>}
+     * @type {Object.<string, Object>}
      */
     var contexts    = {};
 
@@ -147,38 +148,6 @@ define(function (require, exports, module) {
     }
     
     /**
-     * Loads the extension that lives at baseUrl into its own Require.js context
-     *
-     * @param {!string} name, used to identify the extension
-     * @param {!{baseUrl: string}} config object with baseUrl property containing absolute path of extension
-     * @param {!string} entryPoint, name of the main js file to load
-     * @return {!$.Promise} A promise object that is resolved when the extension is loaded, or rejected
-     *              if the extension fails to load or throws an exception immediately when loaded.
-     *              (Note: if extension contains a JS syntax error, promise is resolved not rejected).
-     */
-    function loadExtension(name, config, entryPoint) {
-        var promise = new $.Deferred();
-
-        // Try to load the package.json to figure out if we are loading a theme.
-        ExtensionUtils.loadPackageJson(config.baseUrl).always(promise.resolve);
-
-        return promise
-            .then(function(metadata) {
-                // No special handling for themes... Let the promise propagate into the ExtensionManager
-                if (metadata && "theme" in metadata) {
-                    return;
-                }
-
-                return loadExtensionModule(name, config, entryPoint);
-            })
-            .then(function () {
-                $(exports).triggerHandler("load", config.baseUrl);
-            }, function (err) {
-                $(exports).triggerHandler("loadFailed", config.baseUrl);
-            });
-    }
-    
-    /**
      * Loads the extension module that lives at baseUrl into its own Require.js context
      *
      * @param {!string} name, used to identify the extension
@@ -243,7 +212,13 @@ define(function (require, exports, module) {
             }
         }, function errback(err) {
             // Extension failed to load during the initial require() call
-            console.error("[Extension] failed to load " + config.baseUrl + " " + err);
+            var additionalInfo = String(err);
+            if (err.requireType === "scripterror" && err.originalError) {
+                // This type has a misleading error message - replace it with something clearer (URL of require() call that got a 404 result)
+                additionalInfo = "Module does not exist: " + err.originalError.target.src;
+            }
+            console.error("[Extension] failed to load " + config.baseUrl + " - " + additionalInfo);
+            
             if (err.requireType === "define") {
                 // This type has a useful stack (exception thrown by ext code or info on bad getModule() call)
                 console.log(err.stack);
@@ -251,6 +226,38 @@ define(function (require, exports, module) {
         });
 
         return promise;
+    }
+
+    /**
+     * Loads the extension that lives at baseUrl into its own Require.js context
+     *
+     * @param {!string} name, used to identify the extension
+     * @param {!{baseUrl: string}} config object with baseUrl property containing absolute path of extension
+     * @param {!string} entryPoint, name of the main js file to load
+     * @return {!$.Promise} A promise object that is resolved when the extension is loaded, or rejected
+     *              if the extension fails to load or throws an exception immediately when loaded.
+     *              (Note: if extension contains a JS syntax error, promise is resolved not rejected).
+     */
+    function loadExtension(name, config, entryPoint) {
+        var promise = new $.Deferred();
+
+        // Try to load the package.json to figure out if we are loading a theme.
+        ExtensionUtils.loadPackageJson(config.baseUrl).always(promise.resolve);
+
+        return promise
+            .then(function (metadata) {
+                // No special handling for themes... Let the promise propagate into the ExtensionManager
+                if (metadata && metadata.theme) {
+                    return;
+                }
+
+                return loadExtensionModule(name, config, entryPoint);
+            })
+            .then(function () {
+                exports.trigger("load", config.baseUrl);
+            }, function (err) {
+                exports.trigger("loadFailed", config.baseUrl);
+            });
     }
 
     /**
@@ -429,6 +436,9 @@ define(function (require, exports, module) {
         return promise;
     }
 
+    
+    EventDispatcher.makeEventDispatcher(exports);
+    
     // unit tests
     exports._setInitExtensionTimeout = _setInitExtensionTimeout;
     exports._getInitExtensionTimeout = _getInitExtensionTimeout;

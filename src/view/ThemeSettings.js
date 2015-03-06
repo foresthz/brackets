@@ -22,7 +22,7 @@
  */
 
 /*jslint vars: true, plusplus: true, devel: true, nomen: true, indent: 4, maxerr: 50 */
-/*global $, define, require, Mustache */
+/*global $, define, Mustache */
 
 define(function (require, exports, module) {
     "use strict";
@@ -107,7 +107,7 @@ define(function (require, exports, module) {
                 var attr = $target.attr("data-target");
                 newSettings[attr] = $target.val();
             })
-            .on("change", function () {
+            .on("change", "select", function () {
                 var $target = $(":selected", this);
                 var attr = $target.attr("data-target");
 

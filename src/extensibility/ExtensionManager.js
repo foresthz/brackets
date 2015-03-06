@@ -22,7 +22,7 @@
  */
 
 /*jslint vars: true, plusplus: true, devel: true, nomen: true, regexp: true, indent: 4, maxerr: 50 */
-/*global define, window, $, brackets, semver */
+/*global define, $, brackets */
 /*unittests: ExtensionManager*/
 
 /**
@@ -38,19 +38,30 @@
 define(function (require, exports, module) {
     "use strict";
 
-    var _                = require("thirdparty/lodash"),
-        FileUtils        = require("file/FileUtils"),
-        Package          = require("extensibility/Package"),
-        Async            = require("utils/Async"),
-        ExtensionLoader  = require("utils/ExtensionLoader"),
-        ExtensionUtils   = require("utils/ExtensionUtils"),
-        FileSystem       = require("filesystem/FileSystem"),
-        Strings          = require("strings"),
-        StringUtils      = require("utils/StringUtils"),
-        ThemeManager     = require("view/ThemeManager");
+    var _                   = require("thirdparty/lodash"),
+        EventDispatcher     = require("utils/EventDispatcher"),
+        Package             = require("extensibility/Package"),
+        AppInit             = require("utils/AppInit"),
+        Async               = require("utils/Async"),
+        ExtensionLoader     = require("utils/ExtensionLoader"),
+        ExtensionUtils      = require("utils/ExtensionUtils"),
+        FileSystem          = require("filesystem/FileSystem"),
+        FileUtils           = require("file/FileUtils"),
+        PreferencesManager  = require("preferences/PreferencesManager"),
+        Strings             = require("strings"),
+        StringUtils         = require("utils/StringUtils"),
+        ThemeManager        = require("view/ThemeManager");
 
     // semver.browser is an AMD-compatible module
     var semver = require("extensibility/node/node_modules/semver/semver.browser");
+
+    /**
+     * @private
+     * @type {$.Deferred} Keeps track of the current registry download so that if a request is already
+     * in progress and another request to download the registry comes in, we don't send yet another request.
+     * This is primarily used when multiple view models need to download the registry at the same time.
+     */
+    var pendingDownloadRegistry = null;
 
     /**
      * Extension status constants.
@@ -65,6 +76,11 @@ define(function (require, exports, module) {
         LOCATION_DEV     = "dev",
         LOCATION_USER    = "user",
         LOCATION_UNKNOWN = "unknown";
+
+    /**
+     * Extension auto-install folder. Also used for preferences key.
+     */
+    var FOLDER_AUTOINSTALL = "auto-install-extensions";
 
     /**
      * @private
@@ -89,6 +105,8 @@ define(function (require, exports, module) {
      */
     var _idsToRemove = [],
         _idsToUpdate = [];
+
+    PreferencesManager.stateManager.definePreference(FOLDER_AUTOINSTALL, "object", undefined);
 
     /**
      * @private
@@ -131,7 +149,7 @@ define(function (require, exports, module) {
             }
         }
 
-        $(exports).triggerHandler("registryUpdate", [id]);
+        exports.trigger("registryUpdate", id);
     }
 
 
@@ -180,7 +198,12 @@ define(function (require, exports, module) {
      * or rejected if the server can't be reached.
      */
     function downloadRegistry() {
-        var result = new $.Deferred();
+        if (pendingDownloadRegistry) {
+            return pendingDownloadRegistry.promise();
+        }
+
+        pendingDownloadRegistry = new $.Deferred();
+
         $.ajax({
             url: brackets.config.extension_registry,
             dataType: "json",
@@ -194,13 +217,18 @@ define(function (require, exports, module) {
                     extensions[id].registryInfo = data[id];
                     synchronizeEntry(id);
                 });
-                $(exports).triggerHandler("registryDownload");
-                result.resolve();
+                exports.trigger("registryDownload");
+                pendingDownloadRegistry.resolve();
             })
             .fail(function () {
-                result.reject();
+                pendingDownloadRegistry.reject();
+            })
+            .always(function () {
+                // Make sure to clean up the pending registry so that new requests can be made.
+                pendingDownloadRegistry = null;
             });
-        return result.promise();
+
+        return pendingDownloadRegistry.promise();
     }
 
 
@@ -240,7 +268,7 @@ define(function (require, exports, module) {
             };
             synchronizeEntry(id);
             loadTheme(id);
-            $(exports).triggerHandler("statusChange", [id]);
+            exports.trigger("statusChange", id);
         }
 
         ExtensionUtils.loadPackageJson(path)
@@ -358,7 +386,7 @@ define(function (require, exports, module) {
                 .done(function () {
                     extensions[id].installInfo = null;
                     result.resolve();
-                    $(exports).triggerHandler("statusChange", [id]);
+                    exports.trigger("statusChange", id);
                 })
                 .fail(function (err) {
                     result.reject(err);
@@ -378,7 +406,11 @@ define(function (require, exports, module) {
      *     rejected with an error if there's a problem with the update.
      */
     function update(id, packagePath, keepFile) {
-        return Package.installUpdate(packagePath, id, keepFile);
+        return Package.installUpdate(packagePath, id).done(function () {
+            if (!keepFile) {
+                FileSystem.getFileForPath(packagePath).unlink();
+            }
+        });
     }
 
     /**
@@ -416,7 +448,7 @@ define(function (require, exports, module) {
         } else {
             delete _idsToRemove[id];
         }
-        $(exports).triggerHandler("statusChange", [id]);
+        exports.trigger("statusChange", id);
     }
 
     /**
@@ -443,6 +475,10 @@ define(function (require, exports, module) {
      * @param {Object} installationResult info about the install provided by the Package.download function
      */
     function updateFromDownload(installationResult) {
+        if (installationResult.keepFile === undefined) {
+            installationResult.keepFile = false;
+        }
+
         var installationStatus = installationResult.installationStatus;
         if (installationStatus === Package.InstallationStatuses.ALREADY_INSTALLED ||
                 installationStatus === Package.InstallationStatuses.NEEDS_UPDATE ||
@@ -451,7 +487,7 @@ define(function (require, exports, module) {
             var id = installationResult.name;
             delete _idsToRemove[id];
             _idsToUpdate[id] = installationResult;
-            $(exports).triggerHandler("statusChange", [id]);
+            exports.trigger("statusChange", id);
         }
     }
 
@@ -469,7 +505,7 @@ define(function (require, exports, module) {
             FileSystem.getFileForPath(installationResult.localPath).unlink();
         }
         delete _idsToUpdate[id];
-        $(exports).triggerHandler("statusChange", [id]);
+        exports.trigger("statusChange", id);
     }
 
     /**
@@ -576,34 +612,160 @@ define(function (require, exports, module) {
     }
 
     /**
-     * Toggles between truncated and full length extension descriptions
-     * @param {string} id The id of the extension clicked
-     * @param {JQueryElement} $element The DOM element of the extension clicked
-     * @param {boolean} showFull true if full length description should be shown, false for shorten version.
+     * @private
+     * Find valid extensions in specified path
+     * @param {string} dirPath Directory with extensions
+     * @param {Object} autoExtensions Object that maps names of previously auto-installed
+     *      extensions {string} to installed version {string}.
+     * @return {$.Promise} Promise that resolves with arrays for extensions to update and install
      */
-    function toggleDescription(id, $element, showFull) {
-        var description, linkTitle,
-            entry = extensions[id];
+    function _getAutoInstallFiles(dirPath, autoExtensions) {
+        var zipFiles    = [],
+            installZips = [],
+            updateZips  = [],
+            deferred    = new $.Deferred();
 
-        // Toggle between appropriate descriptions and link title,
-        // depending on if extension is installed or not
-        if (showFull) {
-            description = entry.installInfo ? entry.installInfo.metadata.description : entry.registryInfo.metadata.description;
-            linkTitle = Strings.VIEW_TRUNCATED_DESCRIPTION;
-        } else {
-            description = entry.installInfo ? entry.installInfo.metadata.shortdescription : entry.registryInfo.metadata.shortdescription;
-            linkTitle = Strings.VIEW_COMPLETE_DESCRIPTION;
-        }
+        FileSystem.getDirectoryForPath(dirPath).getContents(function (err, contents) {
+            if (!err) {
+                zipFiles = contents.filter(function (dirItem) {
+                    return (dirItem.isFile && FileUtils.getFileExtension(dirItem.fullPath) === "zip");
+                });
+            }
 
-        $element.attr("data-toggle-desc", showFull ? "trunc-desc" : "expand-desc")
-                .attr("title", linkTitle)
-                .prev(".ext-full-description").html(description);
+            // Parse zip files and separate new installs vs. updates
+            Async.doInParallel_aggregateErrors(zipFiles, function (file) {
+                var zipFilePromise = new $.Deferred();
+
+                // Call validate() so that we open the local zip file and parse the
+                // package.json. We need the name to detect if this zip will be a
+                // new install or an update.
+                Package.validate(file.fullPath, { requirePackageJSON: true }).done(function (info) {
+                    if (info.errors.length) {
+                        zipFilePromise.reject(Package.formatError(info.errors));
+                        return;
+                    }
+
+                    var extensionInfo, installedVersion, zipArray, existingItem,
+                        extensionName   = info.metadata.name,
+                        autoExtVersion  = autoExtensions[extensionName];
+
+                    // Verify extension has not already been auto-installed/updated
+                    if (autoExtVersion && semver.lte(info.metadata.version, autoExtVersion)) {
+                        // Have already auto installed/updated version >= version of this extension
+                        zipFilePromise.reject();
+                        return;
+                    }
+
+                    // Verify extension has not already been installed/updated by some other means
+                    extensionInfo = extensions[extensionName];
+                    installedVersion = extensionInfo && extensionInfo.installInfo && extensionInfo.installInfo.metadata.version;
+                    if (installedVersion && semver.lte(info.metadata.version, installedVersion)) {
+                        // Have already manually installed/updated version >= version of this extension
+                        zipFilePromise.reject();
+                        return;
+                    }
+
+                    // Update appropriate zip array. There could be multiple zip files for an
+                    // extension, so make sure only the latest is stored
+                    zipArray = (installedVersion) ? updateZips : installZips;
+                    zipArray.some(function (zip) {
+                        if (zip.info.metadata.name === extensionName) {
+                            existingItem = zip;
+                            return true;
+                        }
+                        return false;
+                    });
+                    if (existingItem) {
+                        if (semver.lt(existingItem.info.metadata.version, info.metadata.version)) {
+                            existingItem.file = file;
+                            existingItem.info = info;
+                        }
+                    } else {
+                        zipArray.push({ file: file, info: info });
+                    }
+
+                    zipFilePromise.resolve();
+                }).fail(function (err) {
+                    zipFilePromise.reject(Package.formatError(err));
+                });
+
+                return zipFilePromise.promise();
+            }).fail(function (errorArray) {
+                // Async.doInParallel() fails if some are successful, so write errors
+                // to console and always resolve
+                errorArray.forEach(function (errorObj) {
+                    // If we rejected without an error argument, it means it was no problem
+                    // (e.g. same version of extension is already installed)
+                    if (errorObj.error) {
+                        if (errorObj.error.forEach) {
+                            console.error("Errors for", errorObj.item);
+                            errorObj.error.forEach(function (error) {
+                                console.error(Package.formatError(error));
+                            });
+                        } else {
+                            console.error("Error for", errorObj.item, errorObj);
+                        }
+                    }
+                });
+            }).always(function () {
+                deferred.resolve({
+                    installZips: installZips,
+                    updateZips:  updateZips
+                });
+            });
+        });
+
+        return deferred.promise();
     }
 
+    /**
+     * @private
+     * Auto-install extensions bundled with installer
+     * @return {$.Promise} Promise that resolves when finished
+     */
+    function _autoInstallExtensions() {
+        var dirPath        = FileUtils.getDirectoryPath(FileUtils.getNativeBracketsDirectoryPath()) + FOLDER_AUTOINSTALL + "/",
+            autoExtensions = PreferencesManager.getViewState(FOLDER_AUTOINSTALL) || {},
+            deferred       = new $.Deferred();
+
+        _getAutoInstallFiles(dirPath, autoExtensions).done(function (result) {
+            var installPromise = Async.doSequentially(result.installZips, function (zip) {
+                autoExtensions[zip.info.metadata.name] = zip.info.metadata.version;
+                return Package.installFromPath(zip.file.fullPath);
+            });
+
+            var updatePromise = installPromise.always(function () {
+                return Async.doSequentially(result.updateZips, function (zip) {
+                    autoExtensions[zip.info.metadata.name] = zip.info.metadata.version;
+                    return Package.installUpdate(zip.file.fullPath);
+                });
+            });
+
+            // Always resolve the outer promise
+            updatePromise.always(function () {
+                // Keep track of auto-installed extensions so we only install an extension once
+                PreferencesManager.setViewState(FOLDER_AUTOINSTALL, autoExtensions);
+
+                deferred.resolve();
+            });
+        });
+
+        return deferred.promise();
+    }
+
+    AppInit.appReady(function () {
+        Package._getNodeConnectionDeferred().done(function () {
+            _autoInstallExtensions();
+        });
+    });
+
     // Listen to extension load and loadFailed events
-    $(ExtensionLoader)
+    ExtensionLoader
         .on("load", _handleExtensionLoad)
         .on("loadFailed", _handleExtensionLoad);
+    
+    
+    EventDispatcher.makeEventDispatcher(exports);
 
     // Public exports
     exports.downloadRegistry        = downloadRegistry;
@@ -625,7 +787,6 @@ define(function (require, exports, module) {
     exports.updateExtensions        = updateExtensions;
     exports.getAvailableUpdates     = getAvailableUpdates;
     exports.cleanAvailableUpdates   = cleanAvailableUpdates;
-    exports.toggleDescription       = toggleDescription;
     exports.ENABLED       = ENABLED;
     exports.START_FAILED  = START_FAILED;
 
@@ -635,6 +796,7 @@ define(function (require, exports, module) {
     exports.LOCATION_UNKNOWN  = LOCATION_UNKNOWN;
 
     // For unit testing only
-    exports._reset          = _reset;
-    exports._setExtensions  = _setExtensions;
+    exports._getAutoInstallFiles    = _getAutoInstallFiles;
+    exports._reset                  = _reset;
+    exports._setExtensions          = _setExtensions;
 });
